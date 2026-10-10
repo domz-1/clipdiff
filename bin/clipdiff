@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""
+ClipDiff Linux - Smart Visual Side-by-Side Text & Code Difference Viewer
+Author: Adham (@domz-1)
+License: MIT
+"""
+
+import sys
+import os
+import difflib
+import subprocess
+import time
+
+os.environ["DISPLAY"] = os.environ.get("DISPLAY", ":0")
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, Pango
+
+BUFFER_A = "/tmp/clipdiff_a.txt"
+SOUND_DONE = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+
+def get_selected_text():
+    try:
+        res = subprocess.run(["xclip", "-o", "-selection", "primary"], capture_output=True, text=True, timeout=1)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception: pass
+    try:
+        res = subprocess.run(["xclip", "-o", "-selection", "clipboard"], capture_output=True, text=True, timeout=1)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception: pass
+    try:
+        res = subprocess.run(["copyq", "clipboard"], capture_output=True, text=True, timeout=1)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception: pass
+    return ""
+
+class DiffViewerWindow(Gtk.Window):
+    def __init__(self, text_a, text_b):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_title("ClipDiff - Visual Difference Viewer")
+        self.set_default_size(900, 560)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        css = b"""
+        window {
+            background-color: #0f172a;
+        }
+        textview {
+            background-color: #1e293b;
+            color: #f8fafc;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        label#header_a {
+            color: #ef4444;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        label#header_b {
+            color: #10b981;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        """
+        style_provider = Gtk.CssProvider()
+        style_provider.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            style_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        main_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        main_vbox.set_margin_top(12)
+        main_vbox.set_margin_bottom(12)
+        main_vbox.set_margin_start(14)
+        main_vbox.set_margin_end(14)
+
+        # Header Titles
+        hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20, homogeneous=True)
+        lbl_a = Gtk.Label(label="🔴 Original / Text A (Left)")
+        lbl_a.set_name("header_a")
+        lbl_b = Gtk.Label(label="🟢 Modified / Text B (Right)")
+        lbl_b.set_name("header_b")
+        hdr_box.pack_start(lbl_a, True, True, 0)
+        hdr_box.pack_start(lbl_b, True, True, 0)
+        main_vbox.pack_start(hdr_box, False, False, 0)
+
+        # Paned side-by-side textviews
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        
+        # Left buffer
+        self.buf_a = Gtk.TextBuffer()
+        self.tv_a = Gtk.TextView(buffer=self.buf_a)
+        self.tv_a.set_editable(False)
+        self.tv_a.set_cursor_visible(False)
+        scroll_a = Gtk.ScrolledWindow()
+        scroll_a.add(self.tv_a)
+        paned.pack1(scroll_a, True, False)
+
+        # Right buffer
+        self.buf_b = Gtk.TextBuffer()
+        self.tv_b = Gtk.TextView(buffer=self.buf_b)
+        self.tv_b.set_editable(False)
+        self.tv_b.set_cursor_visible(False)
+        scroll_b = Gtk.ScrolledWindow()
+        scroll_b.add(self.tv_b)
+        paned.pack2(scroll_b, True, False)
+
+        main_vbox.pack_start(paned, True, True, 0)
+
+        # Tags for diff highlighting
+        self.buf_a.create_tag("deleted", background="#7f1d1d", foreground="#fecaca")
+        self.buf_b.create_tag("added", background="#064e3b", foreground="#a7f3d0")
+        self.buf_a.create_tag("dim", foreground="#64748b")
+        self.buf_b.create_tag("dim", foreground="#64748b")
+
+        self.compute_diff(text_a, text_b)
+
+        self.add(main_vbox)
+        self.connect("key-press-event", self.on_key)
+        self.show_all()
+
+    def compute_diff(self, text_a, text_b):
+        lines_a = text_a.splitlines()
+        lines_b = text_b.splitlines()
+
+        matcher = difflib.SequenceMatcher(None, lines_a, lines_b)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                for l in lines_a[i1:i2]:
+                    self.buf_a.insert(self.buf_a.get_end_iter(), f"  {l}\n")
+                for l in lines_b[j1:j2]:
+                    self.buf_b.insert(self.buf_b.get_end_iter(), f"  {l}\n")
+            elif tag == 'delete':
+                for l in lines_a[i1:i2]:
+                    start = self.buf_a.get_end_iter()
+                    self.buf_a.insert(start, f"- {l}\n")
+                    self.buf_a.apply_tag_by_name("deleted", start, self.buf_a.get_end_iter())
+                for _ in range(i2 - i1):
+                    start = self.buf_b.get_end_iter()
+                    self.buf_b.insert(start, "~\n")
+                    self.buf_b.apply_tag_by_name("dim", start, self.buf_b.get_end_iter())
+            elif tag == 'insert':
+                for _ in range(j2 - j1):
+                    start = self.buf_a.get_end_iter()
+                    self.buf_a.insert(start, "~\n")
+                    self.buf_a.apply_tag_by_name("dim", start, self.buf_a.get_end_iter())
+                for l in lines_b[j1:j2]:
+                    start = self.buf_b.get_end_iter()
+                    self.buf_b.insert(start, f"+ {l}\n")
+                    self.buf_b.apply_tag_by_name("added", start, self.buf_b.get_end_iter())
+            elif tag == 'replace':
+                for l in lines_a[i1:i2]:
+                    start = self.buf_a.get_end_iter()
+                    self.buf_a.insert(start, f"- {l}\n")
+                    self.buf_a.apply_tag_by_name("deleted", start, self.buf_a.get_end_iter())
+                for l in lines_b[j1:j2]:
+                    start = self.buf_b.get_end_iter()
+                    self.buf_b.insert(start, f"+ {l}\n")
+                    self.buf_b.apply_tag_by_name("added", start, self.buf_b.get_end_iter())
+
+    def on_key(self, widget, event):
+        if event.keyval == Gdk.KEY_Escape or event.keyval == Gdk.KEY_q:
+            self.destroy()
+            Gtk.main_quit()
+            return True
+        return False
+
+def main():
+    if len(sys.argv) > 1:
+        arg1 = sys.argv[1]
+        if arg1 in ["1", "set", "left"]:
+            # Set Text A
+            text = get_selected_text()
+            if not text:
+                subprocess.run(["notify-send", "-u", "low", "ClipDiff", "⚠️ Please highlight or copy Text A first."])
+                return
+            with open(BUFFER_A, "w", encoding="utf-8") as f: f.write(text)
+            subprocess.run(["notify-send", "-u", "normal", "-i", "emblem-default", "📌 ClipDiff: Text A Captured!", "Now highlight Text B and press Alt+2 to compare."])
+            return
+        elif arg1 in ["2", "compare", "right"]:
+            # Compare against Text A
+            if not os.path.exists(BUFFER_A):
+                subprocess.run(["notify-send", "-u", "low", "ClipDiff", "⚠️ Please capture Text A first (Alt+1)."])
+                return
+            with open(BUFFER_A, "r", encoding="utf-8") as f: text_a = f.read()
+            text_b = get_selected_text()
+            if not text_b:
+                subprocess.run(["notify-send", "-u", "low", "ClipDiff", "⚠️ Please highlight Text B to compare."])
+                return
+            win = DiffViewerWindow(text_a, text_b)
+            Gtk.main()
+            return
+        elif len(sys.argv) == 3:
+            # File comparison
+            f1, f2 = sys.argv[1], sys.argv[2]
+            with open(f1, "r", encoding="utf-8", errors="ignore") as fa: text_a = fa.read()
+            with open(f2, "r", encoding="utf-8", errors="ignore") as fb: text_b = fb.read()
+            win = DiffViewerWindow(text_a, text_b)
+            Gtk.main()
+            return
+
+    # Default: Show diff if A exists vs clipboard
+    if os.path.exists(BUFFER_A):
+        with open(BUFFER_A, "r", encoding="utf-8") as f: text_a = f.read()
+        text_b = get_selected_text()
+        if text_b:
+            win = DiffViewerWindow(text_a, text_b)
+            Gtk.main()
+            return
+
+    subprocess.run(["notify-send", "-u", "low", "ClipDiff", "Use Alt+1 to set Text A, then Alt+2 to compare with Text B."])
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ClipDiff Visual Diff Viewer
+GenericName=Text & Code Diff Viewer
+Comment=Visual side-by-side difference viewer for text and code
+Exec=/home/adham/.local/bin/clipdiff 2
+Icon=accessories-dictionary
+Terminal=false
+Type=Application
+Categories=Development;Utility;
